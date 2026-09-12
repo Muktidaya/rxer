@@ -1,6 +1,6 @@
 # rxer
 
-A lean terminal audio receiver and router.
+An audio receiver and router.
 
 `rxer` receives HTTP(S) internet radio, decodes it in Rust, and plays it through
 the default audio output. An optional Ratatui display shows reception status and
