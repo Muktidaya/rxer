@@ -69,9 +69,10 @@ The flags cannot be combined. Neither flag changes the default for later runs.
 - `--resolve`: print the configured URL without network access or playlist resolution.
 - `--check`: decode at least one second without an output device or delayed reconnects;
   playlist alternatives are still tried.
-- `--volume 0..100`: initial playback volume, default 50.
-- `--tui`: show reception status, the current ICY title, and a session timer; `q`, Escape, or Ctrl-C stops playback.
-- Ctrl-C also stops connection setup and ordinary CLI playback.
+- `--volume 0..100`: initial playback volume, default 100.
+- `--tui`: show reception status, the current ICY title, and a session timer; Ctrl-C stops playback.
+- Ctrl-C is the only quit key, in both the TUI and ordinary CLI; it also stops connection setup.
+  `q` and Escape do not stop playback.
 
 AAC/ADTS, MP3, PCM WAV, and AAC-in-MP4 decoding are enabled. A station alias selects a stable
 redirect endpoint; station availability and codec compatibility are external to

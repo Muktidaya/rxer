@@ -35,3 +35,8 @@ builds or an explicit `RXER_BUILD_DIR`; ordinary invocation retains PATH behavio
 Validation: build selection unit/process tests, both feature suites, strict
 Clippy, formatting and Rust 1.88 checks pass locally. Both compiled profiles
 were invoked successfully from outside the checkout.
+
+Ctrl-C is the only quit key in CLI and TUI modes; q and Escape are ignored.
+Initial volume defaults to 100; explicit --volume values still override it.
+Validation: both feature suites and strict Clippy pass; rebuilt both profiles.
+Muted terminal playback survived q/Escape and exited cleanly on Ctrl-C.

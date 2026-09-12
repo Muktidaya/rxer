@@ -25,8 +25,8 @@ Usage: rxer [--tui] [--volume 0..100] [--config PATH] <URL|alias>
 Plays an HTTP(S) audio stream or PLS/M3U/HLS playlist with Rust-native decoding and audio output.
 --release      Run the release executable
 --dev          Run the debug executable
---tui          Show a Ratatui session display; q or Esc stops playback
---volume N     Initial volume (default: 50)
+--tui          Show a Ratatui session display; Ctrl-C stops playback
+--volume N     Initial volume (default: 100)
 --check        Decode one second without opening an audio device
 --resolve      Print the stream URL without starting playback
 --list         List effective station aliases
@@ -60,7 +60,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Action> {
     let mut check = false;
     let mut config = None;
     let mut list = false;
-    let (mut tui, mut resolve_only, mut volume, mut source) = (false, false, 50, None);
+    let (mut tui, mut resolve_only, mut volume, mut source) = (false, false, 100, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
@@ -174,12 +174,20 @@ fn play(
 }
 
 #[cfg(feature = "tui")]
+fn is_quit_key(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+#[cfg(feature = "tui")]
 fn tui_loop(
     player: &rodio::Player,
     stopped: &AtomicBool,
     status: &radio::SharedStatus,
 ) -> Result<()> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::event::{self, Event};
     use ratatui::widgets::{Block, Paragraph};
     struct Restore;
     impl Drop for Restore {
@@ -193,15 +201,20 @@ fn tui_loop(
     while !player.empty() && !stopped.load(Ordering::Relaxed) {
         let state = status.lock().map_err(|_| "status unavailable")?.clone();
         terminal.draw(|frame| {
-            let text = format!("{}\n{}\nSession: {} s\n\nq / Esc / Ctrl-C: stop\n\nSession time is not a signal meter.", state.message, state.title, started.elapsed().as_secs());
-            frame.render_widget(Paragraph::new(text).block(Block::bordered().title("rxer")), frame.area());
+            let text = format!(
+                "{}\n{}\nSession: {} s\n\nCtrl-C: stop\n\nSession time is not a signal meter.",
+                state.message,
+                state.title,
+                started.elapsed().as_secs()
+            );
+            frame.render_widget(
+                Paragraph::new(text).block(Block::bordered().title("rxer")),
+                frame.area(),
+            );
         })?;
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                || (key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)))
+            && is_quit_key(key)
         {
             stopped.store(true, Ordering::Relaxed);
             break;
@@ -269,6 +282,23 @@ mod tests {
     fn args(s: &[&str]) -> Result<Action> {
         parse(s.iter().map(|s| s.to_string()))
     }
+    #[cfg(feature = "tui")]
+    #[test]
+    fn only_ctrl_c_quits_the_tui() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        assert!(is_quit_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        for code in [KeyCode::Char('q'), KeyCode::Esc, KeyCode::Char('c')] {
+            assert!(!is_quit_key(KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+        assert!(!is_quit_key(KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release
+        )));
+    }
     #[test]
     fn validates_inputs_before_spawning() {
         for bad in [
@@ -283,6 +313,10 @@ mod tests {
     }
     #[test]
     fn resolves_alias_and_options() {
+        assert!(matches!(
+            args(&["kusc"]).unwrap(),
+            Action::Play { volume: 100, .. }
+        ));
         assert_eq!(
             args(&["--volume", "0", "kusc", "--tui", "--resolve"]).unwrap(),
             Action::Play {
