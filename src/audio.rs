@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+mod decoded;
+
 type Failure = Arc<Mutex<Option<String>>>;
 
 struct StreamReader<R> {
@@ -30,9 +32,9 @@ impl<R: Read> Read for StreamReader<R> {
         })
     }
 }
-impl<R> Seek for StreamReader<R> {
-    fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
-        Err(io::ErrorKind::Unsupported.into())
+impl<R: Seek> Seek for StreamReader<R> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(position)
     }
 }
 
@@ -132,7 +134,15 @@ impl Audio {
                     if stopped.load(Ordering::Relaxed) {
                         return Ok(());
                     }
-                    return Err("stream ended before one second could be decoded".into());
+                    return Err(format!(
+                        "stream ended after {count}/{target} samples: {}",
+                        self.failure
+                            .lock()
+                            .map_err(|_| "worker state unavailable")?
+                            .as_deref()
+                            .unwrap_or("end of stream")
+                    )
+                    .into());
                 }
             }
         }
@@ -146,8 +156,18 @@ impl Audio {
     }
 }
 
+#[cfg(test)]
 pub fn connect(url: &str, stopped: &Arc<AtomicBool>, reconnect: bool) -> Result<Option<Audio>> {
-    connect_with_idle(url, stopped, reconnect, Duration::from_secs(10))
+    connect_with_idle(url, stopped, reconnect, Duration::from_secs(10), None)
+}
+
+pub fn connect_encoded(
+    url: &str,
+    stopped: &Arc<AtomicBool>,
+    reconnect: bool,
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> Result<Option<Audio>> {
+    connect_with_idle(url, stopped, reconnect, Duration::from_secs(10), encoding)
 }
 
 fn connect_with_idle(
@@ -155,6 +175,7 @@ fn connect_with_idle(
     stopped: &Arc<AtomicBool>,
     reconnect: bool,
     idle: Duration,
+    encoding: Option<&'static encoding_rs::Encoding>,
 ) -> Result<Option<Audio>> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let (tx, rx) = mpsc::sync_channel(8);
@@ -171,9 +192,11 @@ fn connect_with_idle(
         let active = || !cancelled.load(Ordering::Relaxed) && worker_alive.load(Ordering::Relaxed);
         let mut format = None;
         let mut retries = 0;
+        let mut rotation = 0;
+        let mut checkpoint = None;
         while active() {
             let mut produced = 0;
-            let mut format_changed = false;
+
             if let Ok(mut state) = worker_status.lock() {
                 state.message = "connecting".into();
                 state.title.clear();
@@ -182,96 +205,140 @@ fn connect_with_idle(
                 *failure = None;
             }
             let mut run = || -> Result<()> {
-                let response = radio::open(&agent, &url)?;
-                let interval = response
-                    .headers()
-                    .get("icy-metaint")
-                    .map(|h| -> Result<usize> { Ok(h.to_str()?.parse()?) })
-                    .transpose()?;
-                let mime = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let reader = StreamReader {
-                    inner: IcyReader::new(
-                        response.into_body().into_reader(),
-                        interval,
-                        worker_status.clone(),
-                    )?,
-                    failure: worker_failure.clone(),
-                };
-                let mut decoder = Decoder::builder()
-                    .with_data(reader)
-                    .with_seekable(false)
-                    .with_mime_type(&mime)
-                    .build()?;
-                let channels = decoder.channels();
-                let rate = decoder.sample_rate();
-                if format.is_some_and(|f| f != (channels, rate)) {
-                    format_changed = true;
-                    return Err("stream audio format changed; restart rxer".into());
-                }
-                if format.is_none() {
-                    format = Some((channels, rate));
-                    ready_tx.send((channels, rate))?;
-                }
-                if let Ok(mut state) = worker_status.lock() {
-                    state.message = "buffering".into();
-                }
-                // Prime each connection with two blocks before exposing its samples.
-                let mut primed = Vec::with_capacity(2);
-                let mut buffering = true;
-                loop {
-                    if !active() {
-                        return Ok(());
-                    }
-                    let chunk: Vec<_> = decoder
-                        .by_ref()
-                        .take(2048 * channels.get() as usize)
-                        .collect();
-                    if decoder.channels() != channels || decoder.sample_rate() != rate {
-                        format_changed = true;
-                        return Err("stream audio format changed; restart rxer".into());
-                    }
-                    let ended = chunk.is_empty();
-                    if ended && primed.is_empty() {
-                        return Err("stream ended".into());
-                    }
-                    if chunk.len() % channels.get() as usize != 0 {
-                        return Err("incomplete audio frame".into());
-                    }
-                    produced += chunk.len();
-                    if !ended {
-                        primed.push(chunk);
-                    }
-                    if !ended && buffering && primed.len() < 2 {
-                        continue;
-                    }
-                    buffering = false;
-                    for mut chunk in primed.drain(..) {
-                        loop {
-                            if !active() {
-                                return Ok(());
+                let mut resolver = radio::Resolver::new(&url, rotation)?;
+                let mut last_error = "no playable stream entries".to_string();
+                while let Some(mut session) = resolver.next(&agent, &active)? {
+                    session.resume(checkpoint.as_ref());
+                    let mut receive = || -> Result<()> {
+                        while let Some(input) = session.next(&agent, &active)? {
+                            let before = produced;
+                            if let Ok(mut failure) = worker_failure.lock() {
+                                *failure = None;
                             }
-                            match tx.try_send(chunk) {
-                                Ok(()) => break,
-                                Err(mpsc::TrySendError::Full(value)) => {
-                                    chunk = value;
-                                    thread::sleep(Duration::from_millis(10));
+                            let server_encoding = input
+                                .mime
+                                .split(';')
+                                .find_map(|part| part.trim().strip_prefix("charset="))
+                                .and_then(|s| {
+                                    encoding_rs::Encoding::for_label(s.trim_matches('"').as_bytes())
+                                });
+                            let reader = StreamReader {
+                                inner: IcyReader::new(
+                                    input.data,
+                                    input.interval,
+                                    worker_status.clone(),
+                                )?
+                                .with_encoding(encoding.or(server_encoding)),
+                                failure: worker_failure.clone(),
+                            };
+                            let mut builder = Decoder::builder()
+                                .with_data(reader)
+                                .with_mime_type(&input.mime);
+                            if let Some(length) = input.byte_len {
+                                builder = builder.with_byte_len(length);
+                            }
+                            let decoder = builder.build()?;
+                            let decoder = decoded::PrimedDecoder::new(decoder);
+                            let channels = decoder.channels();
+                            let rate = decoder.sample_rate();
+                            if format.is_none() {
+                                format = Some((channels, rate));
+                                ready_tx.send((channels, rate))?;
+                            }
+                            let (channels, rate) = format.unwrap();
+                            // Keep all conversion off the device callback, including span changes.
+                            let mut decoder =
+                                rodio::source::UniformSourceIterator::new(decoder, channels, rate);
+                            if let Ok(mut state) = worker_status.lock() {
+                                state.message = "buffering".into();
+                            }
+                            // Prime each connection with two blocks before exposing its samples.
+                            let mut primed = Vec::with_capacity(2);
+                            let mut buffering = true;
+                            loop {
+                                if !active() {
+                                    return Ok(());
                                 }
-                                Err(mpsc::TrySendError::Disconnected(_)) => return Ok(()),
+                                let chunk: Vec<_> = decoder
+                                    .by_ref()
+                                    .take(2048 * channels.get() as usize)
+                                    .collect();
+                                let ended = chunk.is_empty();
+                                if ended && primed.is_empty() {
+                                    if input.finite {
+                                        break;
+                                    }
+                                    return Err("stream ended".into());
+                                }
+                                if chunk.len() % channels.get() as usize != 0 {
+                                    return Err("incomplete audio frame".into());
+                                }
+                                produced += chunk.len();
+                                if !ended {
+                                    primed.push(chunk);
+                                }
+                                if !ended && buffering && primed.len() < 2 {
+                                    continue;
+                                }
+                                buffering = false;
+                                for mut chunk in primed.drain(..) {
+                                    loop {
+                                        if !active() {
+                                            return Ok(());
+                                        }
+                                        match tx.try_send(chunk) {
+                                            Ok(()) => break,
+                                            Err(mpsc::TrySendError::Full(value)) => {
+                                                chunk = value;
+                                                thread::sleep(Duration::from_millis(10));
+                                            }
+                                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                }
+                                if ended {
+                                    if input.finite {
+                                        break;
+                                    }
+                                    return Err("stream ended".into());
+                                }
+                                if let Ok(mut state) = worker_status.lock() {
+                                    state.message = "playing".into();
+                                }
+                            }
+
+                            if let Some(error) = worker_failure
+                                .lock()
+                                .map_err(|_| "worker state unavailable")?
+                                .take()
+                            {
+                                return Err(error.into());
+                            }
+                            if produced == before {
+                                return Err("segment decoded no audio".into());
+                            }
+                        }
+                        if format.is_none() && active() {
+                            return Err("stream ended without audio".into());
+                        }
+                        Ok(())
+                    };
+                    match receive() {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            last_error = e.to_string();
+                            if let Some(position) = session.checkpoint() {
+                                checkpoint = Some(position);
                             }
                         }
                     }
-                    if ended {
-                        return Err("stream ended".into());
-                    }
-                    if let Ok(mut state) = worker_status.lock() {
-                        state.message = "playing".into();
+                    if !active() {
+                        return Ok(());
                     }
                 }
+                Err(last_error.into())
             };
             let error = match run() {
                 Ok(()) => break,
@@ -280,7 +347,7 @@ fn connect_with_idle(
             if !active() {
                 break;
             }
-            if !reconnect || format_changed {
+            if !reconnect {
                 if let Ok(mut failure) = worker_failure.lock() {
                     *failure = Some(error);
                 }
@@ -297,6 +364,7 @@ fn connect_with_idle(
                 }
                 break;
             }
+            rotation = rotation.wrapping_add(1);
             let delay = 1 << retries;
             retries += 1;
             if let Ok(mut state) = worker_status.lock() {
@@ -378,17 +446,20 @@ mod tests {
         assert_eq!(audio.collect::<Vec<_>>(), vec![0.0, 0.0, 3.0, 4.0]);
     }
     fn wav(rate: u32) -> Vec<u8> {
-        let samples = 16000u32;
+        wav_channels(rate, 1)
+    }
+    fn wav_channels(rate: u32, channels: u16) -> Vec<u8> {
+        let samples = 16000u32 * u32::from(channels);
         let mut out = Vec::new();
         out.extend(b"RIFF");
         out.extend((36 + samples * 2).to_le_bytes());
         out.extend(b"WAVEfmt ");
         out.extend(16u32.to_le_bytes());
         out.extend(1u16.to_le_bytes());
-        out.extend(1u16.to_le_bytes());
+        out.extend(channels.to_le_bytes());
         out.extend(rate.to_le_bytes());
-        out.extend((rate * 2).to_le_bytes());
-        out.extend(2u16.to_le_bytes());
+        out.extend((rate * 2 * u32::from(channels)).to_le_bytes());
+        out.extend((2 * channels).to_le_bytes());
         out.extend(16u16.to_le_bytes());
         out.extend(b"data");
         out.extend((samples * 2).to_le_bytes());
@@ -396,7 +467,7 @@ mod tests {
         out
     }
     #[test]
-    fn reconnects_after_eof_or_stall_and_rejects_format_changes() {
+    fn reconnects_after_eof_or_stall_and_normalizes_format_changes() {
         use std::{io::Write, net::TcpListener, time::Instant};
         for (stall, changed) in [(false, false), (true, false), (false, true)] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -415,11 +486,16 @@ mod tests {
                             Err(e) => panic!("{e}"),
                         }
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
                     let _ = stream.read(&mut [0; 4096]);
-                    let mut body = wav(if changed && attempt == 1 { 16000 } else { 8000 });
+                    let mut body = if changed && attempt == 1 {
+                        wav_channels(16000, 2)
+                    } else {
+                        wav(8000)
+                    };
                     if stall && attempt == 0 {
                         body[4..8].copy_from_slice(&64036u32.to_le_bytes());
                         body[40..44].copy_from_slice(&64000u32.to_le_bytes());
@@ -437,6 +513,7 @@ mod tests {
                 &stopped,
                 true,
                 Duration::from_millis(150),
+                None,
             )
             .unwrap()
             .unwrap();
@@ -454,20 +531,9 @@ mod tests {
                     Err(RecvTimeoutError::Timeout) => assert!(Instant::now() < deadline),
                 }
             }
-            if changed {
-                assert_eq!(samples, 16000);
-                assert!(
-                    audio
-                        .failure
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .unwrap()
-                        .contains("format changed")
-                );
-            } else {
-                assert!(samples > 16000);
-            }
+            assert!(samples > 16000);
+            assert_eq!(audio.rate.get(), 8000);
+            assert_eq!(audio.channels.get(), 1);
             drop(audio);
             server.join().unwrap();
         }
@@ -530,5 +596,123 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
         stop.join().unwrap();
         server.join().unwrap();
+    }
+    #[test]
+    fn hls_finishes_vod_and_advances_live_windows_without_replaying_segments() {
+        use crate::test_support::{Response, Server};
+        for live in [false, true] {
+            let server = Server::new(move |path, _, count| {
+                let body: Vec<u8> = if path == "/radio.m3u8" {
+                    if live {
+                        let text = if count == 1 {
+                            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nseg10.aac\n#EXTINF:1,\nseg11.aac\n"
+                        } else {
+                            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:11\n#EXTINF:1,\nseg11.aac\n#EXTINF:1,\nseg12.aac\n#EXT-X-ENDLIST\n"
+                        };
+                        text.as_bytes().to_vec()
+                    } else {
+                        include_bytes!("../tests/fixtures/media.m3u8").to_vec()
+                    }
+                } else if live {
+                    include_bytes!("../tests/fixtures/tone.aac").to_vec()
+                } else {
+                    match path {
+                        "/init.mp4" => include_bytes!("../tests/fixtures/init.mp4").to_vec(),
+                        "/part00.m4s" => include_bytes!("../tests/fixtures/part00.m4s").to_vec(),
+                        "/part01.m4s" => include_bytes!("../tests/fixtures/part01.m4s").to_vec(),
+                        "/part02.m4s" => include_bytes!("../tests/fixtures/part02.m4s").to_vec(),
+                        _ => panic!("unexpected {path}"),
+                    }
+                };
+                Response::new(
+                    body,
+                    if path.ends_with("m3u8") {
+                        "application/vnd.apple.mpegurl"
+                    } else {
+                        "application/octet-stream"
+                    },
+                )
+            });
+            let stopped = Arc::new(AtomicBool::new(false));
+            let audio = connect(&format!("{}/radio.m3u8", server.url), &stopped, false)
+                .unwrap()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut samples = 0;
+            loop {
+                match audio.rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(chunk) => samples += chunk.len(),
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => assert!(std::time::Instant::now() < deadline),
+                }
+            }
+            assert!(
+                audio.failure.lock().unwrap().is_none(),
+                "{:?}",
+                audio.failure.lock().unwrap()
+            );
+            assert_eq!(audio.rate.get(), 16000);
+            if live {
+                assert!((3 * 32000..3 * 36000).contains(&samples), "{samples}");
+                let requests = server.requests.lock().unwrap();
+                for path in ["/seg10.aac", "/seg11.aac", "/seg12.aac"] {
+                    assert_eq!(requests.iter().filter(|p| p.as_str() == path).count(), 1);
+                }
+            } else {
+                assert!((32000..37000).contains(&samples), "{samples}");
+            }
+        }
+    }
+    #[test]
+    fn hls_retries_failed_segment_without_replaying_completed_segment() {
+        use crate::test_support::{Response, Server};
+        let server = Server::new(|path, _, count| {
+            if path == "/radio.m3u8" {
+                Response::new(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:2.1,\nfirst.aac\n#EXTINF:2.1,\nsecond.aac\n#EXT-X-ENDLIST",
+                    "application/vnd.apple.mpegurl",
+                )
+            } else if path == "/second.aac" && count == 1 {
+                let mut response = Response::new("temporary failure", "text/plain");
+                response.status = "HTTP/1.1 503 Unavailable";
+                response
+            } else {
+                Response::new(
+                    include_bytes!("../tests/fixtures/tone.aac").as_slice(),
+                    "audio/aac",
+                )
+            }
+        });
+        let stopped = Arc::new(AtomicBool::new(false));
+        let audio = connect(&format!("{}/radio.m3u8", server.url), &stopped, true)
+            .unwrap()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut samples = 0;
+        loop {
+            match audio.rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => samples += chunk.len(),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => assert!(std::time::Instant::now() < deadline),
+            }
+        }
+        let error = audio.failure.lock().unwrap().clone();
+        assert!(error.is_none(), "{error:?}");
+        assert!((64000..72000).contains(&samples), "{samples}");
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|p| p.as_str() == "/first.aac")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|p| p.as_str() == "/second.aac")
+                .count(),
+            2
+        );
     }
 }

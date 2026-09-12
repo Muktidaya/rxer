@@ -3,17 +3,11 @@ use crate::{Result, config::validate_url};
 use std::{
     io::{self, Read},
     sync::{Arc, Mutex},
-    time::Duration,
 };
-use ureq::{
-    ResponseExt,
-    unversioned::{
-        resolver::DefaultResolver,
-        transport::{
-            Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
-        },
-    },
-};
+use ureq::ResponseExt;
+mod hls;
+mod transport;
+pub use transport::agent;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
@@ -22,115 +16,191 @@ pub struct Status {
 }
 pub type SharedStatus = Arc<Mutex<Status>>;
 
-// ureq's body timeout is a total budget, unsuitable for endless radio. Keep
-// its normal connector (TLS/proxy support), but cap each blocking input wait.
-// This unversioned interface is why the ureq dependency is pinned exactly.
-#[derive(Debug)]
-struct IdleConnector(Duration);
-#[derive(Debug)]
-struct IdleTransport<T>(T, Duration);
-impl<T: Transport> Connector<T> for IdleConnector {
-    type Out = IdleTransport<T>;
-    fn connect(
-        &self,
-        _: &ConnectionDetails,
-        transport: Option<T>,
-    ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
-        Ok(transport.map(|t| IdleTransport(t, self.0)))
-    }
-}
-impl<T: Transport> Transport for IdleTransport<T> {
-    fn buffers(&mut self) -> &mut dyn Buffers {
-        self.0.buffers()
-    }
-    fn transmit_output(
-        &mut self,
-        amount: usize,
-        timeout: NextTimeout,
-    ) -> std::result::Result<(), ureq::Error> {
-        self.0.transmit_output(amount, timeout)
-    }
-    fn await_input(&mut self, mut timeout: NextTimeout) -> std::result::Result<bool, ureq::Error> {
-        if timeout.after > self.1.into() {
-            timeout.after = self.1.into();
-            timeout.reason = ureq::Timeout::RecvBody;
-        }
-        self.0.await_input(timeout)
-    }
-    fn is_open(&mut self) -> bool {
-        self.0.is_open()
-    }
-    fn is_tls(&self) -> bool {
-        self.0.is_tls()
-    }
-}
-pub fn agent(idle: Duration) -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .timeout_resolve(Some(Duration::from_secs(10)))
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_send_request(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(15)))
-        .max_redirects(5)
-        .build();
-    ureq::Agent::with_parts(
-        config,
-        DefaultConnector::default().chain(IdleConnector(idle)),
-        DefaultResolver::default(),
-    )
-}
 const MAX_PLAYLIST: u64 = 64 * 1024;
 
-pub fn open(agent: &ureq::Agent, input: &str) -> Result<ureq::http::Response<ureq::Body>> {
-    let mut url = validate_url(input)?;
-    let mut visited = std::collections::HashSet::new();
-    for _ in 0..5 {
-        if !visited.insert(url.to_string()) {
-            return Err("playlist cycle detected".into());
+fn read_playlist(mut reader: impl Read, active: &dyn Fn() -> bool) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        if !active() {
+            return Err("playlist reception cancelled".into());
         }
-        let response = agent.get(url.as_str()).header("Icy-MetaData", "1").call()?;
-        let base = validate_url(&response.get_uri().to_string())?;
-        let mime = response
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("")
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let path = base.path().to_ascii_lowercase();
-        let pls = mime == "audio/x-scpls" || path.ends_with(".pls");
-        let m3u = matches!(
-            mime.as_str(),
-            "audio/x-mpegurl"
-                | "audio/mpegurl"
-                | "application/x-mpegurl"
-                | "application/vnd.apple.mpegurl"
-        ) || path.ends_with(".m3u")
-            || path.ends_with(".m3u8");
-        if !pls && !m3u {
-            return Ok(response);
+        if std::time::Instant::now() >= deadline {
+            return Err("playlist reception timed out".into());
         }
-        let mut bytes = Vec::new();
-        response
-            .into_body()
-            .into_reader()
-            .take(MAX_PLAYLIST + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_PLAYLIST {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len() + count > MAX_PLAYLIST as usize {
             return Err("playlist exceeds 64 KiB".into());
         }
-        let text = std::str::from_utf8(&bytes).map_err(|_| "playlist must be UTF-8")?;
-        url = playlist(text, pls, &base)?;
+        bytes.extend_from_slice(&buffer[..count]);
     }
-    Err("playlist nesting exceeds five requests".into())
+    String::from_utf8(bytes).map_err(|_| "playlist must be UTF-8".into())
 }
-fn playlist(text: &str, pls: bool, base: &url::Url) -> Result<url::Url> {
-    let text = text.trim_start_matches('\u{feff}');
-    if text.lines().any(|line| line.trim().starts_with("#EXT-X-")) {
-        return Err("HLS playlists are not supported".into());
+
+pub trait MediaRead: Read + std::io::Seek + Send + Sync {}
+impl<T: Read + std::io::Seek + Send + Sync> MediaRead for T {}
+pub struct Input {
+    pub data: Box<dyn MediaRead>,
+    pub mime: String,
+    pub interval: Option<usize>,
+    pub finite: bool,
+    pub byte_len: Option<u64>,
+}
+struct Unseekable<R>(R);
+impl<R: Read> Read for Unseekable<R> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        self.0.read(b)
     }
+}
+impl<R> std::io::Seek for Unseekable<R> {
+    fn seek(&mut self, _: std::io::SeekFrom) -> io::Result<u64> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+pub enum Session {
+    Direct(Option<Input>),
+    Hls(Box<hls::Session>),
+}
+impl Session {
+    pub fn checkpoint(&self) -> Option<(url::Url, u64)> {
+        match self {
+            Self::Hls(hls) => Some(hls.checkpoint()),
+            Self::Direct(_) => None,
+        }
+    }
+    pub fn resume(&mut self, checkpoint: Option<&(url::Url, u64)>) {
+        if let (Self::Hls(hls), Some(checkpoint)) = (self, checkpoint) {
+            hls.resume(checkpoint);
+        }
+    }
+    pub fn next(
+        &mut self,
+        agent: &ureq::Agent,
+        active: &dyn Fn() -> bool,
+    ) -> Result<Option<Input>> {
+        match self {
+            Self::Direct(input) => Ok(input.take()),
+            Self::Hls(hls) => hls.next(agent, active),
+        }
+    }
+}
+pub struct Resolver {
+    pending: Vec<(url::Url, usize)>,
+    visited: std::collections::HashSet<String>,
+    requests: usize,
+    rotation: usize,
+    last_error: Option<String>,
+}
+impl Resolver {
+    pub fn new(input: &str, rotation: usize) -> Result<Self> {
+        Ok(Self {
+            pending: vec![(validate_url(input)?, 0)],
+            visited: Default::default(),
+            requests: 0,
+            rotation,
+            last_error: None,
+        })
+    }
+    pub fn next(
+        &mut self,
+        agent: &ureq::Agent,
+        active: &dyn Fn() -> bool,
+    ) -> Result<Option<Session>> {
+        while let Some((url, depth)) = self.pending.pop() {
+            if !active() {
+                return Ok(None);
+            }
+            if depth >= 5 {
+                self.last_error = Some("playlist nesting depth exceeded".into());
+                continue;
+            }
+            if self.requests >= 32 {
+                return Err("playlist resolution budget exceeded".into());
+            }
+            if !self.visited.insert(url.to_string()) {
+                self.last_error = Some("playlist cycle or repeated entry".into());
+                continue;
+            }
+            self.requests += 1;
+            let attempt = (|| -> Result<Option<Session>> {
+                let response = agent.get(url.as_str()).header("Icy-MetaData", "1").call()?;
+                let base = validate_url(&response.get_uri().to_string())?;
+                let mime = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = mime
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let path = base.path().to_ascii_lowercase();
+                let pls = kind == "audio/x-scpls" || path.ends_with(".pls");
+                let m3u = matches!(
+                    kind.as_str(),
+                    "audio/x-mpegurl"
+                        | "audio/mpegurl"
+                        | "application/x-mpegurl"
+                        | "application/vnd.apple.mpegurl"
+                ) || path.ends_with(".m3u")
+                    || path.ends_with(".m3u8");
+                if !pls && !m3u {
+                    let interval = response
+                        .headers()
+                        .get("icy-metaint")
+                        .map(|h| -> Result<usize> { Ok(h.to_str()?.parse()?) })
+                        .transpose()?;
+                    return Ok(Some(Session::Direct(Some(Input {
+                        data: Box::new(Unseekable(response.into_body().into_reader())),
+                        mime,
+                        interval,
+                        finite: false,
+                        byte_len: None,
+                    }))));
+                }
+                let text = read_playlist(response.into_body().into_reader(), active)?;
+                let mut entries = if text.lines().any(|l| l.trim().starts_with("#EXT-X-")) {
+                    match hls::parse(&text, &base)? {
+                        hls::Playlist::Master(entries) => entries,
+                        hls::Playlist::Media(media) => {
+                            return Ok(Some(Session::Hls(Box::new(hls::Session::new(
+                                base, media,
+                            )))));
+                        }
+                    }
+                } else {
+                    playlist(&text, pls, &base)?
+                };
+                if entries.is_empty() || entries.len() > 64 {
+                    return Err("playlist must contain 1..64 stream alternatives".into());
+                }
+                let count = entries.len();
+                entries.rotate_left(self.rotation % count);
+                self.pending
+                    .extend(entries.into_iter().rev().map(|u| (u, depth + 1)));
+                Ok(None)
+            })();
+            match attempt {
+                Ok(Some(session)) => return Ok(Some(session)),
+                Ok(None) => (),
+                Err(e) => self.last_error = Some(e.to_string()),
+            }
+        }
+        match self.last_error.take() {
+            Some(e) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+}
+fn playlist(text: &str, pls: bool, base: &url::Url) -> Result<Vec<url::Url>> {
+    let text = text.trim_start_matches('\u{feff}');
     let mut entries = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if pls {
@@ -148,26 +218,34 @@ fn playlist(text: &str, pls: bool, base: &url::Url) -> Result<url::Url> {
         }
     }
     entries.sort_by_key(|e| e.0);
-    for (_, entry) in entries {
-        if entry.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            continue;
-        }
-        if let Ok(url) = base.join(entry)
-            && validate_url(url.as_str()).is_ok()
-        {
-            return Ok(url);
-        }
+    let urls: Vec<_> = entries
+        .into_iter()
+        .filter_map(|(_, entry)| {
+            if entry.is_empty() || entry.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return None;
+            }
+            let url = base.join(entry).ok()?;
+            validate_url(url.as_str()).ok()
+        })
+        .collect();
+    if urls.is_empty() {
+        return Err("playlist contains no HTTP(S) stream entries".into());
     }
-    Err("playlist contains no HTTP(S) stream entries".into())
+    Ok(urls)
 }
 
 pub struct IcyReader<R> {
     inner: R,
     interval: Option<usize>,
     remaining: usize,
+    encoding: Option<&'static encoding_rs::Encoding>,
     status: SharedStatus,
 }
 impl<R: Read> IcyReader<R> {
+    pub fn with_encoding(mut self, encoding: Option<&'static encoding_rs::Encoding>) -> Self {
+        self.encoding = encoding;
+        self
+    }
     pub fn new(inner: R, interval: Option<usize>, status: SharedStatus) -> Result<Self> {
         if interval == Some(0) {
             return Err("icy-metaint must be positive".into());
@@ -176,8 +254,17 @@ impl<R: Read> IcyReader<R> {
             inner,
             interval,
             remaining: interval.unwrap_or(0),
+            encoding: None,
             status,
         })
+    }
+}
+impl<R: std::io::Seek> std::io::Seek for IcyReader<R> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> io::Result<u64> {
+        if self.interval.is_some() {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        self.inner.seek(position)
     }
 }
 impl<R: Read> Read for IcyReader<R> {
@@ -196,7 +283,15 @@ impl<R: Read> Read for IcyReader<R> {
             let size = usize::from(length[0]) * 16;
             self.inner.read_exact(&mut metadata[..size])?;
             if size > 0 {
-                let text = String::from_utf8_lossy(&metadata[..size]);
+                let bytes = &metadata[..size];
+                let encoding = self.encoding.unwrap_or_else(|| {
+                    if std::str::from_utf8(bytes).is_ok() {
+                        encoding_rs::UTF_8
+                    } else {
+                        encoding_rs::WINDOWS_1252
+                    }
+                });
+                let (text, _, _) = encoding.decode(bytes);
                 if let Some(rest) = text.split_once("StreamTitle='").map(|(_, r)| r)
                     && let Some((title, _)) = rest.split_once("';")
                     && let Ok(mut state) = self.status.lock()
@@ -220,8 +315,9 @@ impl<R: Read> Read for IcyReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     #[test]
-    fn playlists_resolve_relative_entries_and_reject_hls() {
+    fn playlists_resolve_relative_entries() {
         let base = url::Url::parse("https://example.org/radio/list.pls").unwrap();
         assert_eq!(
             playlist(
@@ -229,23 +325,13 @@ mod tests {
                 true,
                 &base
             )
-            .unwrap()
-            .as_str(),
+            .unwrap()[0]
+                .as_str(),
             "https://example.org/one"
         );
         assert_eq!(
-            playlist("#EXTM3U\n#EXTINF:-1,Station\nstream", false, &base)
-                .unwrap()
-                .as_str(),
+            playlist("#EXTM3U\n#EXTINF:-1,Station\nstream", false, &base).unwrap()[0].as_str(),
             "https://example.org/radio/stream"
-        );
-        assert!(
-            playlist(
-                "#EXTM3U\n#EXT-X-TARGETDURATION:10\nsegment.aac",
-                false,
-                &base
-            )
-            .is_err()
         );
         assert!(playlist("file:///tmp/audio", false, &base).is_err());
     }
@@ -312,5 +398,34 @@ mod tests {
             .unwrap();
         assert_eq!(response.body_mut().read_to_vec().unwrap(), b"xxxxx");
         server.join().unwrap();
+    }
+    #[test]
+    fn decodes_legacy_metadata_and_honors_explicit_encoding() {
+        for (title, encoding, expected) in [
+            (b"Caf\xe9".as_slice(), None, "Café"),
+            ("音楽".as_bytes(), None, "音楽"),
+            (
+                b"\xcf\xf0\xe8\xe2\xe5\xf2".as_slice(),
+                Some(encoding_rs::WINDOWS_1251),
+                "Привет",
+            ),
+        ] {
+            let mut metadata = b"StreamTitle='".to_vec();
+            metadata.extend(title);
+            metadata.extend(b"';");
+            let blocks = metadata.len().div_ceil(16);
+            metadata.resize(blocks * 16, 0);
+            let mut data = vec![b'a', blocks as u8];
+            data.extend(metadata);
+            data.push(b'b');
+            let status = SharedStatus::default();
+            let mut reader = IcyReader::new(&data[..], Some(1), status.clone())
+                .unwrap()
+                .with_encoding(encoding);
+            let mut audio = [0; 2];
+            reader.read_exact(&mut audio).unwrap();
+            assert_eq!(&audio, b"ab");
+            assert_eq!(status.lock().unwrap().title, expected);
+        }
     }
 }

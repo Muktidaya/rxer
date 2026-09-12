@@ -11,6 +11,9 @@ use std::{
 mod audio;
 mod config;
 mod radio;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 
 const HELP: &str = "rxer — a lean terminal audio receiver and router
 
@@ -18,7 +21,7 @@ Usage: rxer [--tui] [--volume 0..100] [--config PATH] <URL|alias>
        rxer --resolve <URL|alias>
        rxer --list
 
-Plays an HTTP(S) audio stream or PLS/M3U playlist with Rust-native decoding and audio output.
+Plays an HTTP(S) audio stream or PLS/M3U/HLS playlist with Rust-native decoding and audio output.
 --tui          Show a Ratatui session display; q or Esc stops playback
 --volume N     Initial volume (default: 50)
 --check        Decode one second without opening an audio device
@@ -98,7 +101,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Action> {
     })
 }
 
-fn play(url: &str, volume: u8, tui: bool, check: bool) -> Result<()> {
+fn play(
+    url: &str,
+    volume: u8,
+    tui: bool,
+    check: bool,
+    encoding: Option<&'static encoding_rs::Encoding>,
+) -> Result<()> {
     #[cfg(not(feature = "tui"))]
     if tui {
         return Err("this build has no TUI; rebuild with the default features".into());
@@ -116,7 +125,7 @@ fn play(url: &str, volume: u8, tui: bool, check: bool) -> Result<()> {
     if !check {
         eprintln!("rxer: connecting; Ctrl-C to stop");
     }
-    let Some(receiver) = audio::connect(url, &stopped, !check)? else {
+    let Some(receiver) = audio::connect_encoded(url, &stopped, !check, encoding)? else {
         return Ok(());
     };
     if check {
@@ -219,11 +228,17 @@ fn run() -> Result<()> {
             resolve,
             check,
         } => {
-            let url = config::Config::load(config)?.resolve(&url)?;
+            let config = config::Config::load(config)?;
+            let encoding = config
+                .stations
+                .get(&url)
+                .and_then(|s| s.metadata_encoding.as_deref())
+                .and_then(|s| encoding_rs::Encoding::for_label(s.as_bytes()));
+            let url = config.resolve(&url)?;
             if resolve {
                 println!("{url}");
             } else {
-                play(&url, volume, tui, check)?;
+                play(&url, volume, tui, check, encoding)?;
             }
         }
     }

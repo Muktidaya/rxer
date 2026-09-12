@@ -42,12 +42,13 @@ Plain CLI playback remains available in that build.
 - `--list`: list effective station aliases, names, and URLs.
 - `--config PATH`: choose a TOML configuration file.
 - `--resolve`: print the configured URL without network access or playlist resolution.
-- `--check`: decode at least one second without an output device or reconnect retries.
+- `--check`: decode at least one second without an output device or delayed reconnects;
+  playlist alternatives are still tried.
 - `--volume 0..100`: initial playback volume, default 50.
 - `--tui`: show reception status, the current ICY title, and a session timer; `q`, Escape, or Ctrl-C stops playback.
 - Ctrl-C also stops connection setup and ordinary CLI playback.
 
-AAC/ADTS, MP3, and PCM WAV decoding are enabled. A station alias selects a stable
+AAC/ADTS, MP3, PCM WAV, and AAC-in-MP4 decoding are enabled. A station alias selects a stable
 redirect endpoint; station availability and codec compatibility are external to
 `rxer`. AAC support is limited to the profiles supported by Symphonia; this is not
 a promise of universal AAC/HE-AAC compatibility.
@@ -68,6 +69,16 @@ url = "https://example.org/radio.m3u"
 ```
 
 `url` is required; `name` is optional and defaults to the alias for display.
+`metadata_encoding` optionally selects a legacy ICY text encoding, for example:
+
+```toml
+[stations.example]
+url = "https://example.org/radio"
+metadata_encoding = "windows-1251"
+```
+
+Encoding labels follow the Encoding Standard (`utf-8`, `windows-1252`,
+`shift_jis`, and so on); unknown labels are rejected.
 Aliases use lowercase ASCII letters, digits, `_`, and `-`. Unknown fields,
 invalid URLs, and malformed TOML are errors. Future settings can extend this
 format; there are no playback or network settings tables yet.
@@ -98,33 +109,74 @@ RXER_CONFIG=./config.toml rxer --resolve example
 
 PLS and M3U playlists are recognized by Content-Type or the final URL's extension,
 including after HTTP redirects. Relative entries resolve against that final URL.
-PLS selects the lowest-numbered usable `FileN`; M3U selects the first HTTP(S)
-entry. Playlists are UTF-8, limited to 64 KiB each, with at most five resolution
-requests and five HTTP redirects per request. Cycles and HLS tags are rejected.
-Reconnect starts from the original configured URL and resolves playlists again.
-There is no alternate-entry failover or HLS segment playback.
+PLS tries `FileN` entries in numeric order; M3U tries entries in file order.
+Connection, read, and decoder failures advance to another entry. Retries rotate
+entry preference so one broken endpoint does not permanently monopolize playback.
+Playlists are UTF-8, limited to 64 KiB each and 64 alternatives, with a maximum
+nesting depth of five and 32 resolution requests per reconnect attempt. Each
+request permits five HTTP redirects. Cycles are rejected. Playlist reads check
+a 30-second deadline between reads, also subject to the ten-second idle limit.
 
-rxer requests ICY metadata and removes its blocks before decoding. `StreamTitle`
-is shown in the CLI and TUI; control characters are removed and displayed titles
-are capped at 512 characters. Metadata blocks are bounded by ICY's 4,080-byte
-limit. Invalid UTF-8 uses replacement characters; legacy encodings are not
-converted. HTTP responses with ICY headers are supported; legacy `ICY 200 OK`
-status lines are not. Truncated metadata causes stream recovery.
+HLS supports master and media playlists, audio rendition groups, relative URIs,
+VOD completion, live reloads, sequence tracking, discontinuities, gap tags, byte
+ranges, initialization maps, and identity AES-128 encryption (explicit IV or
+media-sequence IV). Supported segment containers are packed AAC/MP3, MPEG-TS
+with ADTS or MPEG audio, and fMP4 with supported audio codecs. Other TS tracks
+are ignored. Fresh live sessions start at most three segments behind the edge;
+segments that have left the server's window are skipped. Reconnect retains the
+last active media playlist's sequence position, so failed fetches retry without
+replaying completed segments. A reset sequence starts a new live window.
+
+Master selection prefers variants without a declared video resolution, then
+lower bandwidth. Associated audio renditions are tried first, with the default
+rendition preferred. This is deterministic selection and failover; there is no
+continuous adaptive-bitrate controller or language-selection interface.
+
+HLS downloads one segment at a time, capped at 16 MiB, plus an initialization map
+capped at 1 MiB. Keys must be exactly 16 bytes. Segment/map/key body reception has
+a 30-second total deadline as well as the idle timeout. Byte-range responses
+must match the requested range. Decryption is in place; TS extraction and map
+assembly can temporarily retain both input and output encoded buffers. HLS
+therefore adds bounded encoded staging, separate from the PCM queue below.
+No external player, downloader, or FFmpeg process runs during playback.
+
+SAMPLE-AES/DRM, low-latency/delta HLS, I-frame-only playlists, video playback,
+unsupported audio codecs (including AC-3 and LATM AAC), and sample-accurate
+continuity across independently decoded segments are outside this implementation.
+Malformed or unsupported media advances through alternatives or ends with an
+error after the retry budget. This receiver follows the conventional delivery
+model in [RFC 8216](https://www.rfc-editor.org/rfc/rfc8216).
+
+rxer accepts ordinary HTTP and legacy `ICY 200 OK` responses, including fragmented
+status lines. It requests ICY metadata and removes its blocks before decoding.
+`StreamTitle` is shown in the CLI and TUI; control characters are removed and
+displayed titles are capped at 512 characters. Metadata blocks are bounded by
+ICY's 4,080-byte limit. Text uses the station's `metadata_encoding`, then a
+recognized Content-Type charset, then valid UTF-8 or Windows-1252 fallback.
+Unknown source bytes can still produce replacement characters. Truncated metadata
+causes stream recovery. HLS timed ID3 metadata is not displayed.
 
 Playback reconnects on EOF, read failures, or decoder failures. Input waits time
 out after ten seconds of inactivity, without limiting healthy stream duration.
 Five retries use delays of 1, 2, 4, 8, and 16 seconds. Decoding at least one second
-resets the retry budget. An audio sample-rate or channel-count change ends the
-session with an error. `--check` makes one attempt and checks initial decoding,
-not long-term station health. Its decoded-audio wait has a 20-second deadline;
-connection/probing happens before that deadline. A peer that continuously trickles
-bytes can evade an idle timeout.
+resets the retry budget. Successful HLS ENDLIST playback finishes normally.
+
+The first decoded audio establishes the session's PCM rate and channel count.
+Later formats are converted to it using rodio's resampler/channel converter on
+the worker. The source adapter accounts for empty MP3 priming frames and decoder
+packet boundaries. The device callback never handles format changes or decoding.
+This does not promise high-end resampling or artifact-free channel conversion.
+
+`--check` makes one resolution/failover pass and checks initial decoding, not
+long-term station health. Its decoded-audio wait has a 20-second deadline;
+connection/probing happens before that deadline. A direct audio peer that
+continuously trickles bytes can evade the idle timeout during probing.
 
 Reception, decoding, retries, and metadata handling run on one worker thread.
 The PCM queue holds eight blocks of at most 2,048 frames. The worker holds at most
 two additional blocks while priming; the audio source holds at most two while
-playing or rebuffering. This bounds rxer's PCM staging to 24,576 frames, separate
-from decoder, HTTP, and device buffers. Startup and reconnect prime two blocks;
+playing or rebuffering. This bounds rxer's PCM block staging to 24,576 frames, separate
+from decoder/resampler lookahead, HTTP, and device buffers. Startup and reconnect prime two blocks;
 starvation emits frame-aligned silence until two blocks arrive. The callback
 uses nonblocking queue reads and performs no network I/O or metadata locking.
 This is bounded best-effort playback, not a hard real-time allocation guarantee.
@@ -146,14 +198,18 @@ cargo test --locked
 cargo test --locked --no-default-features
 ```
 
-Tests use synthetic local HTTP servers for playlists, ICY framing, idle timeouts,
-EOF/stall recovery, and format-change rejection. Config tests isolate platform
+Tests use synthetic local HTTP servers for playlists, ICY framing/encodings, idle
+timeouts, format conversion, HLS container decoding, AES-128, byte ranges, live
+sequence tracking, and reconnect recovery. Config tests isolate platform
 paths in temporary directories. No audio device or live station is required.
 CI runs both feature configurations on Linux, macOS, and Windows.
 
-The new direct dependencies are Serde and TOML for configuration, and `url` for
-URL validation and standards-based relative resolution. ureq is pinned because
-the small idle-timeout adapter uses its unversioned transport API. Keep the project, crate, executable, and documentation name `rxer`.
+Serde/TOML handle configuration and `url` handles relative resolution.
+`encoding_rs` handles text encodings, `mpeg2ts-reader` handles TS demultiplexing,
+and RustCrypto `aes`/`cbc` handle AES-128 segments. fMP4 uses the existing
+Symphonia stack. ureq is pinned for its unversioned transport API; rodio is pinned
+for the decoder span adapter. Synthetic codec fixtures and their generation
+commands are in [`tests/fixtures`](tests/fixtures/README.md). Keep the project, crate, executable, and documentation name `rxer`.
 
 ## License
 

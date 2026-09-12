@@ -116,7 +116,7 @@ fn follows_nested_pls_m3u_and_strips_icy_before_decoding() {
     );
 }
 #[test]
-fn rejects_hls_oversized_empty_playlists_and_invalid_icy() {
+fn rejects_malformed_hls_oversized_empty_playlists_and_invalid_icy() {
     for (mime, body) in [
         (
             "audio/x-mpegurl",

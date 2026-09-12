@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf};
 pub struct Station {
     pub url: String,
     pub name: Option<String>,
+    pub metadata_encoding: Option<String>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +35,11 @@ impl Config {
                     "invalid station alias: {alias:?}; use lowercase letters, digits, _ or -"
                 )
                 .into());
+            }
+            if let Some(label) = &station.metadata_encoding
+                && encoding_rs::Encoding::for_label(label.as_bytes()).is_none()
+            {
+                return Err(format!("station {alias}: unknown metadata encoding {label:?}").into());
             }
             validate_url(&station.url).map_err(|e| format!("station {alias}: {e}"))?;
             if station
@@ -108,6 +114,7 @@ mod tests {
             "[stations.a]\nurl='file:///x'",
             "[stations.UPPER]\nurl='https://example.org'",
             "[stations.a]\nurl='https://example.org'\nurll='typo'",
+            "[stations.a]\nurl='https://example.org'\nmetadata_encoding='unknown-encoding'",
             "invalid toml",
         ] {
             assert!(Config::merge("", Some(text)).is_err(), "{text}");
