@@ -29,3 +29,9 @@ continuity. None is silently claimed as supported.
 Next release gate: review platform CI and perform interactive playback/TUI
 acceptance. Version bump, publication, tags, and release creation require a
 separate release decision.
+
+Local build selection: `--dev` and `--release` dispatch to existing sibling
+builds or an explicit `RXER_BUILD_DIR`; ordinary invocation retains PATH behavior.
+Validation: build selection unit/process tests, both feature suites, strict
+Clippy, formatting and Rust 1.88 checks pass locally. Both compiled profiles
+were invoked successfully from outside the checkout.

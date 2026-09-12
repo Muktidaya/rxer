@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 mod audio;
+mod builds;
 mod config;
 mod radio;
 #[cfg(test)]
@@ -22,6 +23,8 @@ Usage: rxer [--tui] [--volume 0..100] [--config PATH] <URL|alias>
        rxer --list
 
 Plays an HTTP(S) audio stream or PLS/M3U/HLS playlist with Rust-native decoding and audio output.
+--release      Run the release executable
+--dev          Run the debug executable
 --tui          Show a Ratatui session display; q or Esc stops playback
 --volume N     Initial volume (default: 50)
 --check        Decode one second without opening an audio device
@@ -208,7 +211,12 @@ fn tui_loop(
 }
 
 fn run() -> Result<()> {
-    match parse(env::args().skip(1))? {
+    let args = builds::select(env::args_os().skip(1).collect())?;
+    match parse(
+        args.into_iter()
+            .map(|s| s.into_string().map_err(|_| "arguments must be UTF-8"))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    )? {
         Action::Help => println!("{HELP}"),
         Action::Version => println!("rxer {}", env!("CARGO_PKG_VERSION")),
         Action::List { config } => {

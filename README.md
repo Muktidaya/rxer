@@ -37,6 +37,31 @@ platform facilities through Rust ecosystem libraries.
 Use `--no-default-features` with Cargo to omit Ratatui and its terminal backend.
 Plain CLI playback remains available in that build.
 
+## Selecting a local build
+
+Ordinary `rxer` runs the executable on your PATH. `--release` and `--dev`
+select an already-built release or debug executable and forward the remaining
+arguments. They never compile or update a build.
+
+```sh
+cargo build --locked
+cargo build --release --locked
+rxer --dev --tui kusc
+rxer --release --tui kusc
+```
+
+For checkout builds, the flags find sibling `debug/rxer` and `release/rxer`
+executables beneath the same build directory (including `.exe` on Windows).
+Developers can put a symlink to `target/release/rxer` on PATH to default to
+that checkout's release build from any directory. Rebuild with
+`cargo build --release` to update it; ordinary `cargo build` updates only debug.
+
+For an installed executable, selecting its own profile is a no-op. To select
+checkout builds from an installed copy, set `RXER_BUILD_DIR` to the absolute
+build directory containing `debug/` and `release/` (for cross-compilation,
+the directory beneath the target triple). Missing builds produce an error.
+The flags cannot be combined. Neither flag changes the default for later runs.
+
 ## Controls and scope
 
 - `--list`: list effective station aliases, names, and URLs.
