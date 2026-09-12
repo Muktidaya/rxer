@@ -127,7 +127,7 @@ fn play(
     let signal = stopped.clone();
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
     if !check {
-        output::event("connecting", "", "Ctrl-C to stop");
+        output::event("connecting", "", "");
     }
     let Some(receiver) = audio::connect_encoded(url, &stopped, !check, encoding)? else {
         return Ok(());
