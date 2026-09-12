@@ -76,5 +76,5 @@ live station. Keep the project, crate, executable, and documentation name `rxer`
 
 ## License
 
-Copyright 2026 Muktidaya. Licensed under [Apache 2.0](LICENSE).
+Licensed under [Apache 2.0](LICENSE).
 Dependencies retain their own licenses; notably Symphonia uses MPL-2.0.
