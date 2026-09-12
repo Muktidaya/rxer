@@ -17,7 +17,7 @@ mod radio;
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 
-const HELP: &str = "rxer — a lean terminal audio receiver and router
+const HELP: &str = "rxer — An audio receiver and router.
 
 Usage: rxer [--tui] [--volume 0..100] [--config PATH] <URL|alias>
        rxer --resolve <URL|alias>

@@ -1,53 +1,53 @@
 # rxer development status
 
-Unreleased work toward v0.2.0. Package version and v0.1.0 release are unchanged.
+## Release preparation — 2026-09-12
 
-Implemented: embedded TOML stations and user overrides; platform config paths,
-`--config` and `RXER_CONFIG`; PLS/M3U failover; ICY framing, legacy responses and
-metadata encodings; idle timeouts, bounded reconnects and PCM rebuffering;
-worker-side format normalization; conventional HLS live/VOD, master/audio
-rendition selection, packed audio, MPEG-TS, fMP4, byte ranges, maps, and AES-128.
-HLS reconnects retain the last active media sequence checkpoint.
+Work toward v0.2.0 is implemented and audited. [Release notes](CHANGELOG.md)
+are prepared; the package version and existing v0.1.0 tag remain unchanged.
+Version bump, crates.io publication, tags, and GitHub Release creation require
+a separate release decision.
 
-The README owns merge rules, selection/retry policies, resource limits, and
-unsupported protocol/codec cases. No local-file or visualizer feature was added.
-ureq and rodio are pinned at their adapter-tested versions. Tests include small
-synthetic codec fixtures with generation provenance.
+The [README](README.md) owns configuration, protocol policies, resource bounds,
+controls, gain staging, and known limitations. Built-in station definitions are
+embedded data. Network I/O, decoding, metadata parsing, and stream format
+conversion stay off the audio callback; bounded PCM staging and nonblocking
+queue reads are retained. The CLI uses local-clock timestamps and four-space
+field separators. Default volume is unity gain; Ctrl-C is the sole quit key.
 
-Validation covers formatting, strict Clippy and tests with both feature
-configurations, Rust 1.88 compatibility, codec containers, complete fMP4 VOD,
-live sequence advancement, failed-segment recovery without replay, mixed audio
-formats, ICY encodings, and HTTP/decoder failover. The network integration suite
-also passed ten consecutive runs after correcting fixture-server socket mode.
-Remote CI owns cross-platform execution evidence. Interactive device/TUI
-acceptance remains manual.
+## Audit and validation
 
-Remaining scope: DRM/SAMPLE-AES, low-latency/delta HLS, adaptive bitrate/language
-controls, unsupported codecs, timed HLS metadata, and sample-accurate segment
-continuity. None is silently claimed as supported.
+- All eight CI runs through `139bbf9` passed. The final preparation commit must
+  also pass the existing Linux/macOS/Windows and Rust 1.88 CI matrix.
+- Complete local formatting, strict Clippy, and test suites passed with default
+  features and `--no-default-features`; Rust 1.88 checks passed in both modes.
+- Inspection found an accepted but unusable alias form: names beginning with
+  `-` collided with CLI options. Validation now rejects it, with regression
+  coverage and documentation. The user's final help wording is included.
+- Unit/integration fixtures exercise EOF and idle-stall reconnect, bounded PCM
+  rebuffering, cancellation, config precedence, alternate-entry failover, ICY
+  framing/encodings, HLS containers/encryption/ranges/live sequence advancement,
+  failed-segment recovery, and sample-rate/channel changes.
+- Fresh release-executable acceptance used a loopback WAV server that cut its
+  first response short. rxer reported reconnecting, opened a second connection,
+  resumed playing through muted native output, and exited successfully on SIGINT.
+- Both local build selectors and explicit station overrides were exercised from
+  outside the checkout. `--config` beat a deliberately invalid `RXER_CONFIG`;
+  `--resolve` and `--list` returned the expected effective station definitions.
+- `cargo package --locked --allow-dirty` packaged 32 files and successfully
+  compiled the extracted crate. Embedded defaults, codec fixtures, and release
+  notes are included; this created no published release.
+- The user confirmed roughly one hour of uninterrupted KUSC listening with
+  successive metadata updates on macOS. The TUI was visibly confirmed, and a
+  muted terminal check verified q/Escape do not quit while Ctrl-C exits cleanly.
+  This is not native listening acceptance for Linux or Windows.
 
-Next release gate: review platform CI and perform interactive playback/TUI
-acceptance. Version bump, publication, tags, and release creation require a
-separate release decision.
+## Remaining boundaries
 
-Local build selection: `--dev` and `--release` dispatch to existing sibling
-builds or an explicit `RXER_BUILD_DIR`; ordinary invocation retains PATH behavior.
-Validation: build selection unit/process tests, both feature suites, strict
-Clippy, formatting and Rust 1.88 checks pass locally. Both compiled profiles
-were invoked successfully from outside the checkout.
+No local-file playback, visualizers, EQ, normalization, or limiter were added.
+DRM/SAMPLE-AES, low-latency/delta HLS, adaptive bitrate/language controls,
+unsupported codecs, timed HLS metadata, and sample-accurate segment continuity
+remain unsupported. Dependency adapters retain their tested pins. A source
+review and synthetic tests do not establish compatibility with every broadcaster.
 
-Ctrl-C is the only quit key in CLI and TUI modes; q and Escape are ignored.
-Initial volume defaults to 100; explicit --volume values still override it.
-Validation: both feature suites and strict Clippy pass; rebuilt both profiles.
-Muted terminal playback survived q/Escape and exited cleanly on Ctrl-C.
-
-Gain contract: default 100% is unity amplitude (0 dB gain), with attenuation
-only below 100. README distinguishes gain from loudness/full scale and records
-explicit headroom requirements for future DSP. No normalization or limiter added.
-
-CLI events use local-clock time/status/artist/title rows on stderr; metadata
-splitting is best-effort and command-result stdout remains unchanged.
-
-CLI events use four-space separators without column padding, quotes or borders; control
-characters in metadata become spaces and empty trailing fields are omitted.
-The connecting event has no quit-key reminder.
+Next action: review final CI and the prepared release notes, then make the
+separate versioning/publication decision.

@@ -9,7 +9,7 @@ repository = "https://github.com/Muktidaya/rxer"
 readme = "README.md"
 keywords = ["audio", "radio", "terminal", "streaming", "tui"]
 categories = ["command-line-utilities", "multimedia::audio"]
-include = ["src/**", "assets/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+include = ["src/**", "assets/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [features]
 default = ["tui"]

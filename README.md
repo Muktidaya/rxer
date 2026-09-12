@@ -6,6 +6,7 @@ An audio receiver and router.
 the default audio output. An optional Ratatui display shows reception status and
 track titles. The configuration and recovery features below are unreleased work
 toward 0.2.0; the published 0.1.0 release has the original direct-stream behavior.
+See the [prepared 0.2.0 release notes](CHANGELOG.md).
 
 ```sh
 rxer kusc
@@ -149,7 +150,8 @@ metadata_encoding = "windows-1251"
 
 Encoding labels follow the Encoding Standard (`utf-8`, `windows-1252`,
 `shift_jis`, and so on); unknown labels are rejected.
-Aliases use lowercase ASCII letters, digits, `_`, and `-`. Unknown fields,
+Aliases use lowercase ASCII letters, digits, `_`, and `-`, and cannot start
+with `-` (reserved for CLI options). Unknown fields,
 invalid URLs, and malformed TOML are errors. Future settings can extend this
 format; there are no playback or network settings tables yet.
 

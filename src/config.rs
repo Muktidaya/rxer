@@ -27,12 +27,13 @@ impl Config {
         }
         for (alias, station) in &config.stations {
             if alias.is_empty()
+                || alias.starts_with('-')
                 || !alias
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
             {
                 return Err(format!(
-                    "invalid station alias: {alias:?}; use lowercase letters, digits, _ or -"
+                    "invalid station alias: {alias:?}; use lowercase letters, digits, _ or -; do not start with -"
                 )
                 .into());
             }
@@ -113,6 +114,7 @@ mod tests {
             "[stations.a]\nname='missing url'",
             "[stations.a]\nurl='file:///x'",
             "[stations.UPPER]\nurl='https://example.org'",
+            "[stations.-hidden]\nurl='https://example.org'",
             "[stations.a]\nurl='https://example.org'\nurll='typo'",
             "[stations.a]\nurl='https://example.org'\nmetadata_encoding='unknown-encoding'",
             "invalid toml",
