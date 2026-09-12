@@ -1,11 +1,10 @@
 # rxer development status
 
-## Release preparation — 2026-09-12
+## v0.2.0 release checkpoint — 2026-09-12
 
-Work toward v0.2.0 is implemented and audited. [Release notes](CHANGELOG.md)
-are prepared; the package version and existing v0.1.0 tag remain unchanged.
-Version bump, crates.io publication, tags, and GitHub Release creation require
-a separate release decision.
+Version 0.2.0 is implemented and audited, with [release notes](CHANGELOG.md).
+The user authorized versioning, crates.io publication, and the GitHub tag/release
+on 2026-09-12. The registry and GitHub release records own live publication status.
 
 The [README](README.md) owns configuration, protocol policies, resource bounds,
 controls, gain staging, and known limitations. Built-in station definitions are
@@ -16,8 +15,9 @@ field separators. Default volume is unity gain; Ctrl-C is the sole quit key.
 
 ## Audit and validation
 
-- All eight CI runs through `139bbf9` passed. The final preparation commit must
-  also pass the existing Linux/macOS/Windows and Rust 1.88 CI matrix.
+- All eight CI runs through `139bbf9` and the final preparation commit
+  `32ca7d9` passed the Linux/macOS/Windows and Rust 1.88 CI matrix.
+  The versioned release commit is checked by the same matrix before publication.
 - Complete local formatting, strict Clippy, and test suites passed with default
   features and `--no-default-features`; Rust 1.88 checks passed in both modes.
 - Inspection found an accepted but unusable alias form: names beginning with
@@ -49,5 +49,5 @@ unsupported codecs, timed HLS metadata, and sample-accurate segment continuity
 remain unsupported. Dependency adapters retain their tested pins. A source
 review and synthetic tests do not establish compatibility with every broadcaster.
 
-Next action: review final CI and the prepared release notes, then make the
-separate versioning/publication decision.
+Future feature work follows a separate scope decision. No EQ, visualizer, or
+additional playback controls are part of this release.

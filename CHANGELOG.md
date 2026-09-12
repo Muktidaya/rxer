@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-09-12
 
 rxer gains configurable stations and resilient internet-radio reception while
 keeping decoding and network work off the audio callback.
@@ -54,6 +54,3 @@ keeping decoding and network work off the audio callback.
   sample-accurate continuity across HLS segments remain outside this release.
 - Unity volume does not guarantee clipping safety or bit-perfect output.
   Detailed resource bounds and protocol policies are in the [README](README.md).
-
-This entry is prepared release material. The package remains at 0.1.0 until a
-separate versioning and publication decision; no 0.2.0 release has been created.

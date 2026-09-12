@@ -4,9 +4,8 @@ An audio receiver and router.
 
 `rxer` receives HTTP(S) internet radio, decodes it in Rust, and plays it through
 the default audio output. An optional Ratatui display shows reception status and
-track titles. The configuration and recovery features below are unreleased work
-toward 0.2.0; the published 0.1.0 release has the original direct-stream behavior.
-See the [prepared 0.2.0 release notes](CHANGELOG.md).
+track titles. Version 0.2.0 adds configurable stations and resilient radio
+reception; see the [release notes](CHANGELOG.md).
 
 ```sh
 rxer kusc
