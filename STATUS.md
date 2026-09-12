@@ -47,3 +47,6 @@ explicit headroom requirements for future DSP. No normalization or limiter added
 
 CLI events use local-clock time/status/artist/title rows on stderr; metadata
 splitting is best-effort and command-result stdout remains unchanged.
+
+CLI event fields are tab-separated without quotes or borders; control
+characters in metadata become spaces and empty fields are preserved.

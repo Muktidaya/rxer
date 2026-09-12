@@ -84,9 +84,8 @@ a promise of universal AAC/HE-AAC compatibility.
 Playback events and errors go to stderr as local-clock `HH:MM:SS` rows:
 
 ```text
-| 04:05:06 | connecting |  | Ctrl-C to stop |
-| 04:05:07 | playing |  |  |
-| 04:05:08 | playing | Ignace Pleyel | Rondo in Bb |
+04:05:06	connecting		Ctrl-C to stop
+04:05:08	playing	Ignace Pleyel	Rondo in Bb
 ```
 
 Columns are time, status, artist, and title. A timestamp records when rxer
@@ -94,7 +93,9 @@ reports an event, not an exact audible track boundary. Metadata is split at the
 first ` - ` separator (also accepting spaced en/em dashes); without a separator,
 the entire text stays in the title column. This is a display convention, since
 ICY titles do not guarantee structured artist/title fields. Empty fields stay
-empty. Pipes and backslashes are escaped, and control characters become spaces.
+empty. Fields are separated by tabs, with no added quotes or borders.
+Control characters in metadata (including tabs and newlines) become spaces;
+punctuation remains literal. Tab spacing follows the terminal's tab stops.
 
 Updates print only when status or metadata changes. `--help`, `--list`,
 `--resolve`, and `--check` results retain their existing stdout formats.

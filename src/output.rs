@@ -14,24 +14,13 @@ pub fn track(metadata: &str) -> (&str, &str) {
 }
 
 fn field(text: &str) -> String {
-    text.chars().fold(String::new(), |mut out, c| {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '|' => out.push_str("\\|"),
-            c if c.is_control() => out.push(' '),
-            c => out.push(c),
-        }
-        out
-    })
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn row(time: &str, status: &str, artist: &str, title: &str) -> String {
-    format!(
-        "| {time} | {} | {} | {} |",
-        field(status),
-        field(artist),
-        field(title)
-    )
+    [time, status, artist, title].map(field).join("\t")
 }
 
 pub fn event(status: &str, artist: &str, title: &str) {
@@ -58,10 +47,15 @@ mod tests {
         assert_eq!(track(""), ("", ""));
     }
     #[test]
-    fn rows_keep_untrusted_metadata_on_one_line() {
+    fn rows_use_tabs_and_keep_metadata_in_its_field() {
         assert_eq!(
-            row("04:05:06", "playing", "A|B", "Work\nnext"),
-            "| 04:05:06 | playing | A\\|B | Work next |"
+            row("04:05:06", "playing", "A|B", "Work\nnext\tmovement"),
+            "04:05:06\tplaying\tA|B\tWork next movement"
+        );
+        assert_eq!(row("04:05:06", "playing", "", ""), "04:05:06\tplaying\t\t");
+        assert_eq!(
+            row("04:05:06", "playing", "Artist", "A, \"quoted\" title"),
+            "04:05:06\tplaying\tArtist\tA, \"quoted\" title"
         );
     }
 }
