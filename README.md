@@ -79,6 +79,27 @@ redirect endpoint; station availability and codec compatibility are external to
 `rxer`. AAC support is limited to the profiles supported by Symphonia; this is not
 a promise of universal AAC/HE-AAC compatibility.
 
+## CLI output
+
+Playback events and errors go to stderr as local-clock `HH:MM:SS` rows:
+
+```text
+| 04:05:06 | connecting |  | Ctrl-C to stop |
+| 04:05:07 | playing |  |  |
+| 04:05:08 | playing | Ignace Pleyel | Rondo in Bb |
+```
+
+Columns are time, status, artist, and title. A timestamp records when rxer
+reports an event, not an exact audible track boundary. Metadata is split at the
+first ` - ` separator (also accepting spaced en/em dashes); without a separator,
+the entire text stays in the title column. This is a display convention, since
+ICY titles do not guarantee structured artist/title fields. Empty fields stay
+empty. Pipes and backslashes are escaped, and control characters become spaces.
+
+Updates print only when status or metadata changes. `--help`, `--list`,
+`--resolve`, and `--check` results retain their existing stdout formats.
+The TUI retains its own display.
+
 ## Gain staging
 
 The default volume is 100%: a linear amplitude multiplier of 1.0, or **0 dB

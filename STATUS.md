@@ -44,3 +44,6 @@ Muted terminal playback survived q/Escape and exited cleanly on Ctrl-C.
 Gain contract: default 100% is unity amplitude (0 dB gain), with attenuation
 only below 100. README distinguishes gain from loudness/full scale and records
 explicit headroom requirements for future DSP. No normalization or limiter added.
+
+CLI events use local-clock time/status/artist/title rows on stderr; metadata
+splitting is best-effort and command-result stdout remains unchanged.

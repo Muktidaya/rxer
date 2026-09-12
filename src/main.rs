@@ -11,6 +11,7 @@ use std::{
 mod audio;
 mod builds;
 mod config;
+mod output;
 mod radio;
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
@@ -126,7 +127,7 @@ fn play(
     let signal = stopped.clone();
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
     if !check {
-        eprintln!("rxer: connecting; Ctrl-C to stop");
+        output::event("connecting", "", "Ctrl-C to stop");
     }
     let Some(receiver) = audio::connect_encoded(url, &stopped, !check, encoding)? else {
         return Ok(());
@@ -152,15 +153,8 @@ fn play(
             if let Ok(state) = status.lock()
                 && *state != previous
             {
-                eprintln!(
-                    "rxer: {}{}",
-                    state.message,
-                    if state.title.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {}", state.title)
-                    }
-                );
+                let (artist, title) = output::track(&state.title);
+                output::event(&state.message, artist, title);
                 previous = state.clone();
             }
             thread::sleep(Duration::from_millis(100));
@@ -272,7 +266,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("rxer: {e}");
+            output::event("error", "", &e.to_string());
             ExitCode::FAILURE
         }
     }
