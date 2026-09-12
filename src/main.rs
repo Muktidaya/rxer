@@ -26,7 +26,7 @@ Plays an HTTP(S) audio stream or PLS/M3U/HLS playlist with Rust-native decoding 
 --release      Run the release executable
 --dev          Run the debug executable
 --tui          Show a Ratatui session display; Ctrl-C stops playback
---volume N     Initial volume (default: 100)
+--volume N     Volume percent, 0..100 (default: 100 = unity gain, 0 dB)
 --check        Decode one second without opening an audio device
 --resolve      Print the stream URL without starting playback
 --list         List effective station aliases
@@ -137,6 +137,8 @@ fn play(
     let mut device = rodio::DeviceSinkBuilder::open_default_sink()?;
     device.log_on_drop(false);
     let player = rodio::Player::connect_new(device.mixer());
+    // Linear amplitude: 100% = 1.0 (0 dB gain); lower values only attenuate.
+    // Preserve unity by default; future DSP must manage its own boost/headroom.
     player.set_volume(f32::from(volume) / 100.0);
     let failure = receiver.failure.clone();
     let status = receiver.status.clone();

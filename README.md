@@ -69,7 +69,7 @@ The flags cannot be combined. Neither flag changes the default for later runs.
 - `--resolve`: print the configured URL without network access or playlist resolution.
 - `--check`: decode at least one second without an output device or delayed reconnects;
   playlist alternatives are still tried.
-- `--volume 0..100`: initial playback volume, default 100.
+- `--volume 0..100`: linear amplitude percentage, default 100% (unity gain, 0 dB).
 - `--tui`: show reception status, the current ICY title, and a session timer; Ctrl-C stops playback.
 - Ctrl-C is the only quit key, in both the TUI and ordinary CLI; it also stops connection setup.
   `q` and Escape do not stop playback.
@@ -78,6 +78,26 @@ AAC/ADTS, MP3, PCM WAV, and AAC-in-MP4 decoding are enabled. A station alias sel
 redirect endpoint; station availability and codec compatibility are external to
 `rxer`. AAC support is limited to the profiles supported by Symphonia; this is not
 a promise of universal AAC/HE-AAC compatibility.
+
+## Gain staging
+
+The default volume is 100%: a linear amplitude multiplier of 1.0, or **0 dB
+of gain** at rxer's playback volume stage. This preserves the incoming level
+at that stage. It does not normalize loudness, push peaks to 0 dBFS, or set
+system/device volume. Quieter streams remain quieter.
+
+`--volume` only attenuates: 50% is a multiplier of 0.5 (approximately -6.02 dB),
+25% is approximately -12.04 dB, and 0% mutes. Values above 100 are rejected.
+The app adds no automatic gain control, loudness normalization, or limiter.
+Sample-rate/channel conversion and the system's output processing are separate;
+unity volume is not a claim of bit-perfect output or guaranteed clipping safety.
+
+Future EQ and other DSP must explicitly account for boosts and peak headroom,
+with any preattenuation or output protection documented and controllable.
+Bypassed processing should retain unity gain. A default 0 dB volume setting
+alone cannot prevent clipping from boosted filters or an overloaded source.
+These are design requirements for future processing; no EQ or limiter is
+implemented in this pass.
 
 ## Configuration
 

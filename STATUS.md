@@ -40,3 +40,7 @@ Ctrl-C is the only quit key in CLI and TUI modes; q and Escape are ignored.
 Initial volume defaults to 100; explicit --volume values still override it.
 Validation: both feature suites and strict Clippy pass; rebuilt both profiles.
 Muted terminal playback survived q/Escape and exited cleanly on Ctrl-C.
+
+Gain contract: default 100% is unity amplitude (0 dB gain), with attenuation
+only below 100. README distinguishes gain from loudness/full scale and records
+explicit headroom requirements for future DSP. No normalization or limiter added.
