@@ -9,21 +9,22 @@ use std::{
     time::Duration,
 };
 mod audio;
+mod config;
+mod radio;
 
-const KUSC: &str =
-    "https://playerservices.streamtheworld.com/api/livestream-redirect/KUSCAAC96.aac";
 const HELP: &str = "rxer — a lean terminal audio receiver and router
 
-Usage: rxer [--tui] [--volume 0..100] <URL|kusc>
-       rxer --resolve <URL|kusc>
+Usage: rxer [--tui] [--volume 0..100] [--config PATH] <URL|alias>
+       rxer --resolve <URL|alias>
        rxer --list
 
-Plays a direct HTTP(S) audio stream with Rust-native decoding and audio output.
+Plays an HTTP(S) audio stream or PLS/M3U playlist with Rust-native decoding and audio output.
 --tui          Show a Ratatui session display; q or Esc stops playback
 --volume N     Initial volume (default: 50)
 --check        Decode one second without opening an audio device
 --resolve      Print the stream URL without starting playback
---list         List built-in station aliases
+--list         List effective station aliases
+--config PATH  Use this TOML file (overrides RXER_CONFIG and platform default)
 -h, --help     Show help
 -V, --version  Show version
 
@@ -35,9 +36,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 enum Action {
     Help,
     Version,
-    List,
+    List {
+        config: Option<std::path::PathBuf>,
+    },
     Play {
         url: String,
+        config: Option<std::path::PathBuf>,
         tui: bool,
         volume: u8,
         resolve: bool,
@@ -45,32 +49,18 @@ enum Action {
     },
 }
 
-fn resolve(input: &str) -> Result<String> {
-    if input == "kusc" {
-        return Ok(KUSC.into());
-    }
-    let rest = input
-        .strip_prefix("https://")
-        .or_else(|| input.strip_prefix("http://"))
-        .ok_or("expected an HTTP(S) stream URL or station alias; try rxer --list")?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || input.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(
-            "stream URL must have a host and contain no whitespace or control characters".into(),
-        );
-    }
-    Ok(input.into())
-}
-
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Action> {
     let mut args = args.into_iter();
     let mut check = false;
+    let mut config = None;
+    let mut list = false;
     let (mut tui, mut resolve_only, mut volume, mut source) = (false, false, 50, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
-            "--list" => return Ok(Action::List),
+            "--list" => list = true,
+            "--config" => config = Some(args.next().ok_or("--config requires a path")?.into()),
             "--tui" => tui = true,
             "--check" => check = true,
             "--resolve" => resolve_only = true,
@@ -91,9 +81,16 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Action> {
             }
         }
     }
+    if list {
+        if source.is_some() {
+            return Err("--list does not accept a source".into());
+        }
+        return Ok(Action::List { config });
+    }
     let source = source.ok_or("provide a stream URL or alias; try rxer --help")?;
     Ok(Action::Play {
-        url: resolve(&source)?,
+        url: source,
+        config,
         tui,
         volume,
         resolve: resolve_only,
@@ -116,7 +113,10 @@ fn play(url: &str, volume: u8, tui: bool, check: bool) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     let signal = stopped.clone();
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
-    let Some(receiver) = audio::connect(url, &stopped)? else {
+    if !check {
+        eprintln!("rxer: connecting; Ctrl-C to stop");
+    }
+    let Some(receiver) = audio::connect(url, &stopped, !check)? else {
         return Ok(());
     };
     if check {
@@ -127,13 +127,28 @@ fn play(url: &str, volume: u8, tui: bool, check: bool) -> Result<()> {
     let player = rodio::Player::connect_new(device.mixer());
     player.set_volume(f32::from(volume) / 100.0);
     let failure = receiver.failure.clone();
+    let status = receiver.status.clone();
     player.append(receiver);
     if tui {
         #[cfg(feature = "tui")]
-        tui_loop(&player, &stopped)?;
+        tui_loop(&player, &stopped, &status)?;
     } else {
-        eprintln!("rxer: playing; Ctrl-C to stop");
+        let mut previous = radio::Status::default();
         while !player.empty() && !stopped.load(Ordering::Relaxed) {
+            if let Ok(state) = status.lock()
+                && *state != previous
+            {
+                eprintln!(
+                    "rxer: {}{}",
+                    state.message,
+                    if state.title.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", state.title)
+                    }
+                );
+                previous = state.clone();
+            }
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -147,7 +162,11 @@ fn play(url: &str, volume: u8, tui: bool, check: bool) -> Result<()> {
 }
 
 #[cfg(feature = "tui")]
-fn tui_loop(player: &rodio::Player, stopped: &AtomicBool) -> Result<()> {
+fn tui_loop(
+    player: &rodio::Player,
+    stopped: &AtomicBool,
+    status: &radio::SharedStatus,
+) -> Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::widgets::{Block, Paragraph};
     struct Restore;
@@ -160,8 +179,9 @@ fn tui_loop(player: &rodio::Player, stopped: &AtomicBool) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let started = std::time::Instant::now();
     while !player.empty() && !stopped.load(Ordering::Relaxed) {
+        let state = status.lock().map_err(|_| "status unavailable")?.clone();
         terminal.draw(|frame| {
-            let text = format!("Playing internet radio\nSession: {} s\n\nq / Esc / Ctrl-C: stop\n\nSession time is not a signal meter.", started.elapsed().as_secs());
+            let text = format!("{}\n{}\nSession: {} s\n\nq / Esc / Ctrl-C: stop\n\nSession time is not a signal meter.", state.message, state.title, started.elapsed().as_secs());
             frame.render_widget(Paragraph::new(text).block(Block::bordered().title("rxer")), frame.area());
         })?;
         if event::poll(Duration::from_millis(100))?
@@ -182,14 +202,24 @@ fn run() -> Result<()> {
     match parse(env::args().skip(1))? {
         Action::Help => println!("{HELP}"),
         Action::Version => println!("rxer {}", env!("CARGO_PKG_VERSION")),
-        Action::List => println!("kusc\tClassical California KUSC"),
+        Action::List { config } => {
+            for (alias, station) in config::Config::load(config)?.stations {
+                println!(
+                    "{alias}\t{}\t{}",
+                    station.name.as_deref().unwrap_or(&alias),
+                    station.url
+                );
+            }
+        }
         Action::Play {
             url,
+            config,
             tui,
             volume,
             resolve,
             check,
         } => {
+            let url = config::Config::load(config)?.resolve(&url)?;
             if resolve {
                 println!("{url}");
             } else {
@@ -224,9 +254,6 @@ mod tests {
             vec!["--volume"],
             vec!["--unknown"],
             vec!["kusc", "kusc"],
-            vec!["file:///etc/passwd"],
-            vec!["https://"],
-            vec!["https://a/\n"],
         ] {
             assert!(args(&bad).is_err(), "{bad:?}");
         }
@@ -236,7 +263,8 @@ mod tests {
         assert_eq!(
             args(&["--volume", "0", "kusc", "--tui", "--resolve"]).unwrap(),
             Action::Play {
-                url: KUSC.into(),
+                url: "kusc".into(),
+                config: None,
                 volume: 0,
                 tui: true,
                 resolve: true,

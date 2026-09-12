@@ -1,0 +1,3 @@
+[stations.kusc]
+name = "Classical California KUSC"
+url = "https://playerservices.streamtheworld.com/api/livestream-redirect/KUSCAAC96.aac"

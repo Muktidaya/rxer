@@ -5,6 +5,14 @@ use std::{
     thread,
 };
 
+fn rxer() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rxer"));
+    command
+        .arg("--config")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/defaults.toml"));
+    command
+}
+
 fn wav() -> Vec<u8> {
     let data_len = 16000u32 * 2;
     let mut b = Vec::new();
@@ -52,10 +60,7 @@ fn serve(status: &str, content_type: &str, body: Vec<u8>, redirect: bool) -> Str
 #[test]
 fn decodes_http_audio_after_redirect_without_device() {
     let url = serve("200 OK", "audio/wav", wav(), true);
-    let out = Command::new(env!("CARGO_BIN_EXE_rxer"))
-        .args(["--check", &url])
-        .output()
-        .unwrap();
+    let out = rxer().args(["--check", &url]).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -71,11 +76,126 @@ fn rejects_http_errors_and_non_audio() {
         ("200 OK", b"<html>not audio</html>".to_vec()),
     ] {
         let url = serve(status, "text/html", body, false);
-        let out = Command::new(env!("CARGO_BIN_EXE_rxer"))
-            .args(["--check", &url])
-            .output()
-            .unwrap();
+        let out = rxer().args(["--check", &url]).output().unwrap();
         assert!(!out.status.success());
         assert!(!out.stderr.is_empty());
     }
+}
+
+#[test]
+fn follows_nested_pls_m3u_and_strips_icy_before_decoding() {
+    let audio = wav();
+    let mut icy = Vec::new();
+    for chunk in audio.chunks(1024) {
+        icy.extend(chunk);
+        if chunk.len() == 1024 {
+            let mut metadata = b"StreamTitle='test';StreamUrl='https://example.org';".to_vec();
+            metadata.resize(64, 0);
+            icy.push(4);
+            icy.extend(metadata);
+        }
+    }
+    let stream = serve("200 OK", "audio/wav\r\nicy-metaint: 1024", icy, false);
+    let m3u = serve(
+        "200 OK",
+        "audio/x-mpegurl",
+        format!("#EXTM3U\n{stream}\n").into_bytes(),
+        false,
+    );
+    let pls = serve(
+        "200 OK",
+        "audio/x-scpls",
+        format!("[playlist]\nFile1={m3u}\nNumberOfEntries=1\n").into_bytes(),
+        false,
+    );
+    let out = rxer().args(["--check", &pls]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+#[test]
+fn rejects_hls_oversized_empty_playlists_and_invalid_icy() {
+    for (mime, body) in [
+        (
+            "audio/x-mpegurl",
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:10\nsegment.aac".to_vec(),
+        ),
+        ("audio/x-scpls", vec![b'x'; 65537]),
+        ("audio/x-mpegurl", b"#EXTM3U\n".to_vec()),
+        ("audio/wav\r\nicy-metaint: 0", wav()),
+        ("audio/wav\r\nicy-metaint: invalid", wav()),
+    ] {
+        let url = serve("200 OK", mime, body, false);
+        let out = rxer().args(["--check", &url]).output().unwrap();
+        assert!(!out.status.success());
+    }
+}
+
+#[test]
+fn resolves_relative_playlist_entry_against_redirect_destination() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for path in ["/start", "/nested/list.m3u", "/nested/audio"] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut b = [0];
+                stream.read_exact(&mut b).unwrap();
+                request.push(b[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with(&format!("GET {path} ")), "{request}");
+            assert!(request.to_ascii_lowercase().contains("icy-metadata: 1"));
+            if path == "/start" {
+                write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{address}/nested/list.m3u\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            } else {
+                let body = if path.ends_with(".m3u") {
+                    b"#EXTM3U\naudio\n".to_vec()
+                } else {
+                    wav()
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                let _ = stream.write_all(&body);
+            }
+        }
+    });
+    let out = rxer()
+        .args(["--check", &format!("http://{address}/start")])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.join().unwrap();
+}
+#[test]
+fn rejects_playlist_cycles() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = stream.read(&mut [0; 4096]);
+        let body = format!("http://{address}/list.m3u");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let out = rxer()
+        .args(["--check", &format!("http://{address}/list.m3u")])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cycle"));
+    server.join().unwrap();
 }
