@@ -21,7 +21,7 @@ fn field(text: &str) -> String {
 
 fn row(time: &str, status: &str, artist: &str, title: &str) -> String {
     let [time, status, artist, title] = [time, status, artist, title].map(field);
-    format!("{time:8}    {status:12}    {artist:28}    {title}")
+    format!("{time}    {status}    {artist}    {title}")
         .trim_end()
         .to_owned()
 }
@@ -50,11 +50,12 @@ mod tests {
         assert_eq!(track(""), ("", ""));
     }
     #[test]
-    fn rows_align_status_and_artist_without_tabs_or_empty_tails() {
+    fn rows_use_four_space_separators_without_padding_or_empty_tails() {
         let playing = row("04:05:06", "playing", "Hans Zimmer", "The Thin Red Line");
-        let connecting = row("04:05:06", "connecting", "Hans Zimmer", "The Thin Red Line");
-        assert_eq!(playing.find("Hans Zimmer"), connecting.find("Hans Zimmer"));
-        assert_eq!(playing.find("The Thin Red Line"), Some(60));
+        assert_eq!(
+            playing,
+            "04:05:06    playing    Hans Zimmer    The Thin Red Line"
+        );
         assert!(!playing.contains('\t'));
         assert_eq!(
             row("04:05:06", "connecting", "", ""),

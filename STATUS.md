@@ -48,6 +48,6 @@ explicit headroom requirements for future DSP. No normalization or limiter added
 CLI events use local-clock time/status/artist/title rows on stderr; metadata
 splitting is best-effort and command-result stdout remains unchanged.
 
-CLI events use space-padded columns without quotes or borders; control
+CLI events use four-space separators without column padding, quotes or borders; control
 characters in metadata become spaces and empty trailing fields are omitted.
 The connecting event has no quit-key reminder.
