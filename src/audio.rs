@@ -129,6 +129,9 @@ impl Audio {
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    if stopped.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
                     return Err("stream ended before one second could be decoded".into());
                 }
             }
@@ -312,7 +315,14 @@ fn connect_with_idle(
             alive.store(false, Ordering::Relaxed);
             return Ok(None);
         }
-        match ready_rx.recv_timeout(Duration::from_millis(100)) {
+        let ready = ready_rx.recv_timeout(Duration::from_millis(100));
+        // Cancellation may close the channel while recv_timeout is waiting.
+        // Recheck before treating disconnection as a failure or opening a device.
+        if stopped.load(Ordering::Relaxed) {
+            alive.store(false, Ordering::Relaxed);
+            return Ok(None);
+        }
+        match ready {
             Ok((channels, rate)) => {
                 return Ok(Some(Audio {
                     rx,
